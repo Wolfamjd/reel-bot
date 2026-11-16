@@ -41,15 +41,17 @@ def owner_id() -> int | None:
     return int(v) if v.isdigit() else None
 
 
-async def download(url: str, folder: str) -> Path:
+async def download(url: str, folder: str) -> tuple[Path, dict]:
     args = [
         sys.executable, "-m", "yt_dlp",
-        "--no-playlist", "--restrict-filenames", "-N", "8",
-        # MP4 (H.264) plays and saves to the iPhone Photos app.
-        "-f", "bv*[ext=mp4][vcodec^=avc]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
-        "-S", f"filesize:{MAX_BYTES // (1024 * 1024)}M",
+        "--no-playlist", "--restrict-filenames", "-N", "8", "--no-simulate",
+        # Highest resolution first, H.264 preferred (plays and saves to the iPhone Photos app),
+        # staying under Telegram's 50 MB limit for bots.
+        "-f", "bv*+ba/b",
+        "-S", f"res,vcodec:h264,acodec:aac,filesize~{MAX_BYTES // (1024 * 1024)}M",
         "--merge-output-format", "mp4",
         "-o", os.path.join(folder, "%(id)s.%(ext)s"),
+        "--print", "after_move:%(width)s|%(height)s|%(duration)s",
     ]
     if shutil.which("ffmpeg") is None:
         try:
@@ -61,11 +63,20 @@ async def download(url: str, folder: str) -> Path:
         args += ["--cookies", COOKIES]
     args.append(url)
     proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    _, err = await proc.communicate()
+    out, err = await proc.communicate()
     files = [p for p in Path(folder).iterdir() if p.is_file()]
     if proc.returncode != 0 or not files:
         raise RuntimeError(err.decode(errors="ignore").strip().splitlines()[-1] if err else "download failed")
-    return max(files, key=lambda p: p.stat().st_size)
+    meta: dict = {}
+    lines = out.decode(errors="ignore").strip().splitlines()
+    if lines:
+        parts = lines[-1].split("|")
+        for key, val in zip(("width", "height", "duration"), parts):
+            try:
+                meta[key] = int(float(val))
+            except ValueError:
+                pass
+    return max(files, key=lambda p: p.stat().st_size), meta
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -90,12 +101,13 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         status = await msg.reply_text("⏳ جاري التحميل…")
         with tempfile.TemporaryDirectory() as tmp:
             try:
-                path = await download(url, tmp)
+                path, meta = await download(url, tmp)
                 if path.stat().st_size > MAX_BYTES:
                     await status.edit_text("❌ المقطع أكبر من 50MB، تلقرام ما يسمح للبوت يرسله.")
                     continue
                 with path.open("rb") as f:
-                    await msg.reply_video(f, supports_streaming=True, read_timeout=300, write_timeout=300)
+                    # Real width/height so Telegram shows it in its true shape and quality.
+                    await msg.reply_video(f, supports_streaming=True, read_timeout=300, write_timeout=300, **meta)
                 await status.delete()
             except Exception as e:
                 await status.edit_text(f"❌ ما قدرت أحمّل المقطع.\n{str(e)[:300]}")
