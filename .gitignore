@@ -1,0 +1,5 @@
+.env
+.venv/
+owner_id.txt
+__pycache__/
+cookies.txt
