@@ -77,7 +77,7 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if owner is None:
         OWNER_FILE.write_text(str(user.id))
         owner = user.id
-        await msg.reply_text("✅ صرت مالك البوت. أرسل أي رابط مقطع وأرجّعه لك.")
+        await msg.reply_text(f"✅ صرت مالك البوت. أرسل أي رابط مقطع وأرجّعه لك.\nرقمك: {user.id}")
     if user.id != owner:
         return  # private bot: ignore everyone else
 
