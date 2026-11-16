@@ -6,6 +6,8 @@ Settings come from a .env file next to this script (or environment variables):
   COOKIES     optional path to a cookies.txt (helps with Instagram when it asks for a login)
 """
 import asyncio
+import hashlib
+import hmac
 import os
 import re
 import shutil
@@ -98,35 +100,103 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     for url in urls:
-        status = await msg.reply_text("⏳ جاري التحميل…")
-        with tempfile.TemporaryDirectory() as tmp:
-            try:
-                path, meta = await download(url, tmp)
-                if path.stat().st_size > MAX_BYTES:
-                    await status.edit_text("❌ المقطع أكبر من 50MB، تلقرام ما يسمح للبوت يرسله.")
-                    continue
-                with path.open("rb") as f:
-                    # Real width/height so Telegram shows it in its true shape and quality.
-                    await msg.reply_video(f, supports_streaming=True, read_timeout=300, write_timeout=300, **meta)
-                await status.delete()
-            except Exception as e:
-                await status.edit_text(f"❌ ما قدرت أحمّل المقطع.\n{str(e)[:300]}")
+        await send_link(context.bot, msg.chat_id, url)
+
+
+async def send_link(bot, chat_id: int, url: str) -> None:
+    """Download one link and send the video to chat_id."""
+    status = await bot.send_message(chat_id, "⏳ جاري التحميل…")
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            path, meta = await download(url, tmp)
+            if path.stat().st_size > MAX_BYTES:
+                await status.edit_text("❌ المقطع أكبر من 50MB، تلقرام ما يسمح للبوت يرسله.")
+                return
+            with path.open("rb") as f:
+                # Real width/height so Telegram shows it in its true shape and quality.
+                await bot.send_video(chat_id, f, supports_streaming=True, read_timeout=300, write_timeout=300, **meta)
+            await status.delete()
+        except Exception as e:
+            await status.edit_text(f"❌ ما قدرت أحمّل المقطع.\n{str(e)[:300]}")
+
+
+def shortcut_key() -> str:
+    """The key the iPhone Shortcut sends; derived from the bot token, so nothing extra to set up."""
+    return hashlib.sha256(("shortcut:" + TOKEN).encode()).hexdigest()[:24]
+
+
+async def serve_web(app: Application, public_url: str) -> None:
+    import uvicorn
+    from starlette.applications import Starlette
+    from starlette.requests import Request
+    from starlette.responses import PlainTextResponse, Response
+    from starlette.routing import Route
+
+    port = int(os.environ.get("PORT", "10000"))
+    secret = hashlib.sha256(("webhook:" + TOKEN).encode()).hexdigest()[:32]
+    tg_path = "/tg-" + hashlib.sha256(TOKEN.encode()).hexdigest()[:16]
+
+    async def telegram(request: Request) -> Response:
+        if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != secret:
+            return Response(status_code=403)
+        await app.update_queue.put(Update.de_json(await request.json(), app.bot))
+        return Response()
+
+    async def shortcut(request: Request) -> Response:
+        # iPhone Shortcut: POST /dl with {"key": "...", "url": "..."} (or the same as query/form fields).
+        data: dict = dict(request.query_params)
+        try:
+            if request.method == "POST":
+                if "json" in request.headers.get("content-type", ""):
+                    data.update(await request.json())
+                else:
+                    data.update(dict(await request.form()))
+        except Exception:
+            pass
+        if not hmac.compare_digest(str(data.get("key", "")), shortcut_key()):
+            return PlainTextResponse("wrong key", status_code=403)
+        owner = owner_id()
+        if owner is None:
+            return PlainTextResponse("send the bot a message first", status_code=409)
+        urls = URL_RE.findall(str(data.get("url", "")))
+        if not urls:
+            return PlainTextResponse("no link", status_code=400)
+        for url in urls:
+            asyncio.create_task(send_link(app.bot, owner, url))
+        return PlainTextResponse("✅ وصل الرابط، المقطع جاي في تلقرام")
+
+    async def health(_: Request) -> Response:
+        return PlainTextResponse("ok")
+
+    web = Starlette(routes=[
+        Route(tg_path, telegram, methods=["POST"]),
+        Route("/dl", shortcut, methods=["GET", "POST"]),
+        Route("/", health),
+    ])
+    server = uvicorn.Server(uvicorn.Config(web, host="0.0.0.0", port=port, log_level="warning"))
+    async with app:
+        await app.bot.set_webhook(public_url.rstrip("/") + tg_path, secret_token=secret)
+        await app.start()
+        print(f"Bot running (webhook) on port {port}.")
+        await server.serve()
+        await app.stop()
 
 
 def main() -> None:
     if not TOKEN:
         sys.exit("BOT_TOKEN is missing: put it in .env")
-    app = Application.builder().token(TOKEN).concurrent_updates(True).build()
-    app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, on_message))
-    # On Render (free) the service sleeps when idle; a webhook wakes it up when you send a link.
+    if len(sys.argv) > 1 and sys.argv[1] == "key":
+        print(shortcut_key())
+        return
     public_url = os.environ.get("WEBHOOK_URL") or os.environ.get("RENDER_EXTERNAL_URL")
+    builder = Application.builder().token(TOKEN).concurrent_updates(True)
     if public_url:
-        port = int(os.environ.get("PORT", "10000"))
-        secret = TOKEN.split(":")[0] + "x" + str(abs(hash(TOKEN)) % 10**8)
-        path = "tg-" + TOKEN.split(":")[-1][-12:]
-        print(f"Bot running (webhook) on port {port}.")
-        app.run_webhook(listen="0.0.0.0", port=port, url_path=path,
-                        webhook_url=f"{public_url.rstrip('/')}/{path}", secret_token=secret)
+        builder = builder.updater(None)
+    app = builder.build()
+    app.add_handler(MessageHandler(filters.TEXT | filters.CAPTION, on_message))
+    if public_url:
+        # On Render (free) the service sleeps when idle; a request wakes it up.
+        asyncio.run(serve_web(app, public_url))
     else:
         print("Bot running. Press Ctrl+C to stop.")
         app.run_polling(drop_pending_updates=False)
