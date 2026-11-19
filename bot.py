@@ -35,7 +35,21 @@ def load_env() -> None:
 load_env()
 TOKEN = os.environ.get("BOT_TOKEN", "")
 OWNER_FILE = HERE / "owner_id.txt"
-COOKIES = os.environ.get("COOKIES", "")
+# Render "Secret Files" land in /etc/secrets; a cookies.txt there is used automatically.
+COOKIES = os.environ.get("COOKIES", "") or ("/etc/secrets/cookies.txt" if Path("/etc/secrets/cookies.txt").exists() else "")
+
+
+def friendly_error(err: str) -> str:
+    e = err.lower()
+    if "not a bot" in e or "sign in to confirm" in e:
+        return "❌ يوتيوب منع السيرفر وطلب تسجيل دخول.\nالحل: إضافة ملف cookies من حساب يوتيوب ثانوي في Render."
+    if "private" in e or "login required" in e or "log in" in e:
+        return "❌ المقطع خاص أو يحتاج تسجيل دخول، ما أقدر أحمّله."
+    if "unsupported url" in e:
+        return "❌ هذا الرابط مو مدعوم. أرسل رابط مقطع من تيك توك، إنستقرام، X أو يوتيوب."
+    if "removed" in e or "unavailable" in e or "not available" in e:
+        return "❌ المقطع محذوف أو غير متاح."
+    return "❌ ما قدرت أحمّل المقطع. جرّب مرة ثانية بعد شوي."
 
 
 def owner_id() -> int | None:
@@ -117,7 +131,8 @@ async def send_link(bot, chat_id: int, url: str) -> None:
                 await bot.send_video(chat_id, f, supports_streaming=True, read_timeout=300, write_timeout=300, **meta)
             await status.delete()
         except Exception as e:
-            await status.edit_text(f"❌ ما قدرت أحمّل المقطع.\n{str(e)[:300]}")
+            print(f"download failed for {url}: {e}", flush=True)
+            await status.edit_text(friendly_error(str(e)), disable_web_page_preview=True)
 
 
 def shortcut_key() -> str:
