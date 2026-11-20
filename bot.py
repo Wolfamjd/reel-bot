@@ -43,7 +43,7 @@ def friendly_error(err: str) -> str:
     e = err.lower()
     if "not a bot" in e or "sign in to confirm" in e:
         return "❌ يوتيوب منع السيرفر وطلب تسجيل دخول.\nالحل: إضافة ملف cookies من حساب يوتيوب ثانوي في Render."
-    if "private" in e or "login required" in e or "log in" in e:
+    if any(k in e for k in ("private", "login required", "log in", "logged-in", "empty media", "not granting access")):
         return "❌ المقطع خاص أو يحتاج تسجيل دخول، ما أقدر أحمّله."
     if "unsupported url" in e:
         return "❌ هذا الرابط مو مدعوم. أرسل رابط مقطع من تيك توك، إنستقرام، X أو يوتيوب."
